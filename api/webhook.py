@@ -200,6 +200,7 @@ def webhook():
             summary=description,
             assignee_account_id=user["jira_account_id"],
             due_date=due_date,
+            issue_type=project.get("issue_type", "Задание"),
         )
         key = issue["key"]
 

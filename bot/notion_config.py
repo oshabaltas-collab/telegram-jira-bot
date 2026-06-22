@@ -61,7 +61,8 @@ def load_projects() -> dict[str, dict]:
         aliases_raw = _text(props.get("Aliases", {}))
         if not name or not jira_key:
             continue
-        entry = {"name": name, "jira_key": jira_key.strip()}
+        issue_type = _text(props.get("Issue Type", {})).strip() or "Задание"
+        entry = {"name": name, "jira_key": jira_key.strip(), "issue_type": issue_type}
         for alias in aliases_raw.split(","):
             alias = alias.strip()
             if alias:

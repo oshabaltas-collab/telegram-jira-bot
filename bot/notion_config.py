@@ -1,0 +1,88 @@
+"""
+Reads project and user config from two Notion databases.
+
+Projects DB columns:
+  - Name         (Title)   — canonical project name, e.g. "BAS"
+  - Jira Key     (Text)    — Jira project key, e.g. "BAS"
+  - Aliases      (Text)    — comma-separated, e.g. "BAS, bas, БАС, BAS Digital"
+
+Users DB columns:
+  - Name             (Title)  — canonical user name, e.g. "Дарина"
+  - Jira Account ID  (Text)   — Atlassian accountId
+  - Aliases          (Text)   — comma-separated, e.g. "Дарина, Daria, Дарья"
+"""
+
+import os
+import requests
+
+_NOTION_API = "https://api.notion.com/v1"
+_NOTION_VERSION = "2022-06-28"
+
+
+def _headers() -> dict:
+    return {
+        "Authorization": f"Bearer {os.environ['NOTION_TOKEN']}",
+        "Notion-Version": _NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
+
+
+def _query_db(db_id: str) -> list[dict]:
+    url = f"{_NOTION_API}/databases/{db_id}/query"
+    results = []
+    payload: dict = {}
+    while True:
+        resp = requests.post(url, headers=_headers(), json=payload, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        results.extend(data["results"])
+        if not data.get("has_more"):
+            break
+        payload["start_cursor"] = data["next_cursor"]
+    return results
+
+
+def _text(prop: dict) -> str:
+    kind = prop.get("type")
+    parts = prop.get(kind, [])
+    if isinstance(parts, list):
+        return "".join(p["text"]["content"] for p in parts if p.get("text"))
+    return ""
+
+
+def load_projects() -> dict[str, dict]:
+    """Returns {alias_lower: {name, jira_key}} lookup."""
+    pages = _query_db(os.environ["NOTION_PROJECTS_DB_ID"])
+    lookup: dict[str, dict] = {}
+    for page in pages:
+        props = page["properties"]
+        name = _text(props.get("Name", {}))
+        jira_key = _text(props.get("Jira Key", {}))
+        aliases_raw = _text(props.get("Aliases", {}))
+        if not name or not jira_key:
+            continue
+        entry = {"name": name, "jira_key": jira_key.strip()}
+        for alias in aliases_raw.split(","):
+            alias = alias.strip()
+            if alias:
+                lookup[alias.lower()] = entry
+    return lookup
+
+
+def load_users() -> dict[str, dict]:
+    """Returns {alias_lower: {name, jira_account_id}} lookup."""
+    pages = _query_db(os.environ["NOTION_USERS_DB_ID"])
+    lookup: dict[str, dict] = {}
+    for page in pages:
+        props = page["properties"]
+        name = _text(props.get("Name", {}))
+        account_id = _text(props.get("Jira Account ID", {}))
+        aliases_raw = _text(props.get("Aliases", {}))
+        if not name or not account_id:
+            continue
+        entry = {"name": name, "jira_account_id": account_id.strip()}
+        for alias in aliases_raw.split(","):
+            alias = alias.strip()
+            if alias:
+                lookup[alias.lower()] = entry
+    return lookup

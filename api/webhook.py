@@ -93,6 +93,12 @@ def webhook():
     chat_id: int = message["chat"]["id"]
     message_id: int = message["message_id"]
 
+    # Helper: reply with chat/thread IDs so admin can configure env vars
+    if text.strip() == "/threadid":
+        thread_id = message.get("message_thread_id", "—")
+        _send(chat_id, f"<b>Chat ID:</b> <code>{chat_id}</code>\n<b>Thread ID:</b> <code>{thread_id}</code>", reply_to_id=message_id)
+        return "ok", 200
+
     parsed = parse_message(text)
     if parsed is None:
         return "ok", 200  # No #задача/#бэклог — ignore silently

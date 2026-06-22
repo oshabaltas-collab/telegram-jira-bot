@@ -1,14 +1,13 @@
 {
   "builds": [
-    {
-      "src": "api/webhook.py",
-      "use": "@vercel/python"
-    }
+    { "src": "api/webhook.py",      "use": "@vercel/python" },
+    { "src": "api/daily_report.py", "use": "@vercel/python" }
   ],
   "routes": [
-    {
-      "src": "/api/webhook",
-      "dest": "/api/webhook.py"
-    }
+    { "src": "/api/webhook",      "dest": "/api/webhook.py" },
+    { "src": "/api/daily_report", "dest": "/api/daily_report.py" }
+  ],
+  "crons": [
+    { "path": "/api/daily_report", "schedule": "0 7,8 * * *" }
   ]
 }

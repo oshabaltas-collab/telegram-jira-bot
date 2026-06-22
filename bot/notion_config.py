@@ -69,6 +69,20 @@ def load_projects() -> dict[str, dict]:
     return lookup
 
 
+def load_report_projects() -> list[dict]:
+    """Returns [{name, jira_key}] for projects with 'Отчёт' checkbox enabled."""
+    pages = _query_db(os.environ["NOTION_PROJECTS_DB_ID"])
+    result = []
+    for page in pages:
+        props = page["properties"]
+        name = _text(props.get("Name", {}))
+        jira_key = _text(props.get("Jira Key", {}))
+        include = props.get("Отчёт", {}).get("checkbox", False)
+        if name and jira_key and include:
+            result.append({"name": name, "jira_key": jira_key.strip()})
+    return result
+
+
 def load_users() -> dict[str, dict]:
     """Returns {alias_lower: {name, jira_account_id}} lookup."""
     pages = _query_db(os.environ["NOTION_USERS_DB_ID"])

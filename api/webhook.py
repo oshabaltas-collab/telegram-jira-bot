@@ -9,6 +9,7 @@ import hmac
 import logging
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 # Make the project root importable regardless of how Vercel resolves paths.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -31,8 +32,14 @@ _HELP = (
     "Проект: CRM\n"
     "Ответственный: Оксана\n"
     "Описание задачи\n"
-    "25.12.2025</code>  ← дедлайн необязателен"
+    "25.12.2025</code>  ← дедлайн необязателен (без него — +5 дней автоматически)"
 )
+
+
+def _default_due_date(msg_timestamp: int) -> str:
+    """Returns ISO date = message date + 5 days."""
+    base = datetime.fromtimestamp(msg_timestamp, tz=timezone.utc) if msg_timestamp else datetime.now(tz=timezone.utc)
+    return (base + timedelta(days=5)).strftime("%Y-%m-%d")
 
 
 def _send(chat_id: int, text: str) -> None:
@@ -70,6 +77,10 @@ def webhook():
     parsed = parse_message(text)
     if parsed is None:
         return "ok", 200  # No #задача — ignore silently
+
+    # Use explicit deadline or fall back to message date + 5 days
+    due_date = parsed.due_date or _default_due_date(message.get("date", 0))
+    due_auto = parsed.due_date is None
 
     # --- Load config from Notion ---
     try:
@@ -114,23 +125,21 @@ def webhook():
             project_key=project["jira_key"],
             summary=description,
             assignee_account_id=user["jira_account_id"],
-            due_date=parsed.due_date,
+            due_date=due_date,
         )
         key = issue["key"]
         url = f'{os.environ["JIRA_URL"].rstrip("/")}/browse/{key}'
-        deadline_line = ""
-        if parsed.due_date:
-            d, m, y = parsed.due_date[8:], parsed.due_date[5:7], parsed.due_date[:4]
-            deadline_line = f"\n<b>Дедлайн:</b> {d}.{m}.{y}"
+        d, m, y = due_date[8:], due_date[5:7], due_date[:4]
+        due_label = f"{d}.{m}.{y}" + (" (авто +5 дней)" if due_auto else "")
         _send(
             chat_id,
             f"✅ Задача создана\n"
             f"<b>Проект:</b> {project['name']}\n"
-            f"<b>Исполнитель:</b> {user['name']}"
-            f"{deadline_line}\n"
+            f"<b>Исполнитель:</b> {user['name']}\n"
+            f"<b>Дедлайн:</b> {due_label}\n"
             f"<a href='{url}'>{key}</a>",
         )
-        logger.info("Created %s → %s / %s (due: %s)", key, project["name"], user["name"], parsed.due_date)
+        logger.info("Created %s → %s / %s (due: %s, auto=%s)", key, project["name"], user["name"], due_date, due_auto)
     except Exception as exc:
         logger.exception("Jira error: %s", exc)
         _send(chat_id, "❌ Ошибка при создании задачи в Jira. Проверьте логи Vercel.")

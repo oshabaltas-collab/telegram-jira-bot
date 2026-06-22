@@ -113,7 +113,10 @@ def load_users() -> dict[str, dict]:
         aliases_raw = _text(props.get("Aliases", {}))
         if not name or not account_id:
             continue
-        entry = {"name": name, "jira_account_id": account_id.strip()}
+        # Strip any "?cloudId=..." query suffix that sneaks in when an accountId
+        # is copied from a Jira profile URL — Jira rejects it as an invalid user.
+        clean_id = account_id.strip().split("?", 1)[0]
+        entry = {"name": name, "jira_account_id": clean_id}
         for alias in aliases_raw.split(","):
             alias = alias.strip()
             if alias:

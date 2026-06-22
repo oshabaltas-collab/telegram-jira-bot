@@ -17,7 +17,7 @@ class JiraClient:
         summary: str,
         assignee_account_id: str | None = None,
         due_date: str | None = None,
-        issue_type: str = "Task",
+        issue_type: str = "Задание",
     ) -> dict:
         payload: dict = {
             "fields": {

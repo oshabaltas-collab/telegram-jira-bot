@@ -32,7 +32,9 @@ _HELP = (
     "Проект: CRM\n"
     "Ответственный: Оксана\n"
     "Описание задачи\n"
-    "25.12.2025</code>  ← дедлайн необязателен (без него — +5 дней автоматически)"
+    "25.12.2025</code>  ← дедлайн необязателен (без него — +5 дней автоматически)\n\n"
+    "<b>#задача</b> — статус «К выполнению»\n"
+    "<b>#бэклог</b> — статус «Backlog»"
 )
 
 
@@ -42,11 +44,27 @@ def _default_due_date(msg_timestamp: int) -> str:
     return (base + timedelta(days=5)).strftime("%Y-%m-%d")
 
 
-def _send(chat_id: int, text: str) -> None:
+def _send(chat_id: int, text: str, reply_to_id: int | None = None) -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
+    payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_to_id:
+        payload["reply_parameters"] = {"message_id": reply_to_id}
     requests.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+        json=payload,
+        timeout=10,
+    )
+
+
+def _react(chat_id: int, message_id: int, emoji: str = "✅") -> None:
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    requests.post(
+        f"https://api.telegram.org/bot{token}/setMessageReaction",
+        json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": [{"type": "emoji", "emoji": emoji}],
+        },
         timeout=10,
     )
 
@@ -73,10 +91,11 @@ def webhook():
 
     text = message.get("text", "")
     chat_id: int = message["chat"]["id"]
+    message_id: int = message["message_id"]
 
     parsed = parse_message(text)
     if parsed is None:
-        return "ok", 200  # No #задача — ignore silently
+        return "ok", 200  # No #задача/#бэклог — ignore silently
 
     # Use explicit deadline or fall back to message date + 5 days
     due_date = parsed.due_date or _default_due_date(message.get("date", 0))
@@ -88,7 +107,7 @@ def webhook():
         user_lookup = load_users()
     except Exception as exc:
         logger.exception("Notion read failed: %s", exc)
-        _send(chat_id, "❌ Не удалось прочитать конфиг из Notion. Проверьте настройки.")
+        _send(chat_id, "❌ Не удалось прочитать конфиг из Notion. Проверьте настройки.", reply_to_id=message_id)
         return "ok", 200
 
     project = resolve_project(parsed.raw_project, project_lookup)
@@ -111,7 +130,7 @@ def webhook():
         errors.append("⚠️ Нет описания задачи.")
 
     if errors:
-        _send(chat_id, "\n".join(errors) + "\n\n" + _HELP)
+        _send(chat_id, "\n".join(errors) + "\n\n" + _HELP, reply_to_id=message_id)
         return "ok", 200
 
     # --- Create Jira issue ---
@@ -128,20 +147,33 @@ def webhook():
             due_date=due_date,
         )
         key = issue["key"]
+
+        # Move to backlog if requested
+        if parsed.tag == "бэклог":
+            try:
+                jira.transition_to_backlog(key)
+            except Exception as exc:
+                logger.warning("Backlog transition failed for %s: %s", key, exc)
+
         url = f'{os.environ["JIRA_URL"].rstrip("/")}/browse/{key}'
         d, m, y = due_date[8:], due_date[5:7], due_date[:4]
         due_label = f"{d}.{m}.{y}" + (" (авто +5 дней)" if due_auto else "")
+        status_label = "Backlog" if parsed.tag == "бэклог" else "К выполнению"
+
+        _react(chat_id, message_id, "✅")
         _send(
             chat_id,
             f"✅ Задача создана\n"
             f"<b>Проект:</b> {project['name']}\n"
             f"<b>Исполнитель:</b> {user['name']}\n"
+            f"<b>Статус:</b> {status_label}\n"
             f"<b>Дедлайн:</b> {due_label}\n"
             f"<a href='{url}'>{key}</a>",
+            reply_to_id=message_id,
         )
-        logger.info("Created %s → %s / %s (due: %s, auto=%s)", key, project["name"], user["name"], due_date, due_auto)
+        logger.info("Created %s → %s / %s (due: %s, auto=%s, tag=%s)", key, project["name"], user["name"], due_date, due_auto, parsed.tag)
     except Exception as exc:
         logger.exception("Jira error: %s", exc)
-        _send(chat_id, "❌ Ошибка при создании задачи в Jira. Проверьте логи Vercel.")
+        _send(chat_id, "❌ Ошибка при создании задачи в Jira. Проверьте логи Vercel.", reply_to_id=message_id)
 
     return "ok", 200

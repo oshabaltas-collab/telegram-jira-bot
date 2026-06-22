@@ -40,3 +40,25 @@ class JiraClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def get_transitions(self, issue_key: str) -> list[dict]:
+        resp = requests.get(
+            f"{self.base}/rest/api/3/issue/{issue_key}/transitions",
+            auth=self.auth,
+            headers=self.headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("transitions", [])
+
+    def transition_to_backlog(self, issue_key: str) -> None:
+        transitions = self.get_transitions(issue_key)
+        backlog = next((t for t in transitions if t["name"].lower() == "backlog"), None)
+        if backlog:
+            requests.post(
+                f"{self.base}/rest/api/3/issue/{issue_key}/transitions",
+                json={"transition": {"id": backlog["id"]}},
+                auth=self.auth,
+                headers=self.headers,
+                timeout=15,
+            ).raise_for_status()

@@ -1,5 +1,5 @@
 """
-Parses a Telegram message that contains #задача.
+Parses a Telegram message that contains #задача or #бэклог.
 
 Expected format (labels are case-insensitive):
 
@@ -9,6 +9,9 @@ Expected format (labels are case-insensitive):
     Описание задачи идёт здесь
     и может занимать несколько строк
     25.12.2025
+
+#задача  → создаёт задачу со статусом «К выполнению»
+#бэклог  → создаёт задачу и переводит в статус «backlog»
 
 Recognised label variants:
   project   → Проект / Project
@@ -20,7 +23,7 @@ Deadline (optional, last line): dd.mm.yyyy or dd/mm/yyyy
 import re
 from dataclasses import dataclass
 
-_TAG = re.compile(r"#задача", re.IGNORECASE)
+_TAG = re.compile(r"#(задача|бэклог)", re.IGNORECASE)
 _PROJECT = re.compile(r"^(проект|project)\s*:\s*(.+)$", re.IGNORECASE)
 _ASSIGNEE = re.compile(r"^(ответственный|исполнитель|assignee)\s*:\s*(.+)$", re.IGNORECASE)
 # Matches dd.mm.yyyy or dd/mm/yyyy as a standalone line
@@ -29,6 +32,7 @@ _DATE = re.compile(r"^(\d{2})[./](\d{2})[./](\d{4})$")
 
 @dataclass
 class ParsedTask:
+    tag: str  # "задача" or "бэклог"
     raw_project: str | None
     raw_assignee: str | None
     description: str | None
@@ -45,10 +49,12 @@ def _parse_date(line: str) -> str | None:
 
 
 def parse_message(text: str) -> ParsedTask | None:
-    """Returns None when #задача tag is absent."""
-    if not _TAG.search(text):
+    """Returns None when neither #задача nor #бэклог tag is present."""
+    tag_match = _TAG.search(text)
+    if not tag_match:
         return None
 
+    tag = tag_match.group(1).lower()
     body = _TAG.sub("", text).strip()
 
     raw_project = None
@@ -77,6 +83,7 @@ def parse_message(text: str) -> ParsedTask | None:
         desc_lines.append(line)
 
     return ParsedTask(
+        tag=tag,
         raw_project=raw_project,
         raw_assignee=raw_assignee,
         description="\n".join(desc_lines).strip() or None,

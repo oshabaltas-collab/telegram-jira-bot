@@ -70,7 +70,12 @@ def load_projects() -> dict[str, dict]:
 
 
 def load_report_projects() -> list[dict]:
-    """Returns [{name, jira_key}] for projects with 'Отчёт' checkbox enabled."""
+    """Returns [{name, jira_key, report_chat_id, report_thread_id}]
+    for projects with 'Отчёт' checkbox enabled.
+
+    report_chat_id / report_thread_id may be None if not set in Notion;
+    the caller falls back to TELEGRAM_REPORT_CHAT_ID / TELEGRAM_REPORT_THREAD_ID env vars.
+    """
     pages = _query_db(os.environ["NOTION_PROJECTS_DB_ID"])
     result = []
     for page in pages:
@@ -78,8 +83,16 @@ def load_report_projects() -> list[dict]:
         name = _text(props.get("Name", {}))
         jira_key = _text(props.get("Jira Key", {}))
         include = props.get("Отчёт", {}).get("checkbox", False)
-        if name and jira_key and include:
-            result.append({"name": name, "jira_key": jira_key.strip()})
+        if not (name and jira_key and include):
+            continue
+        chat_raw = _text(props.get("Report Chat ID", {})).strip()
+        thread_raw = _text(props.get("Report Thread ID", {})).strip()
+        result.append({
+            "name": name,
+            "jira_key": jira_key.strip(),
+            "report_chat_id": int(chat_raw) if chat_raw.lstrip("-").isdigit() else None,
+            "report_thread_id": int(thread_raw) if thread_raw.isdigit() else None,
+        })
     return result
 
 

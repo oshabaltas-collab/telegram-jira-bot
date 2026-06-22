@@ -82,21 +82,29 @@ def _build_project_block(proj: dict, report: dict) -> str:
     return "\n".join(lines)
 
 
+def _resolve_destination(proj: dict) -> tuple[int, int] | None:
+    """Returns (chat_id, thread_id) for a project.
+
+    Priority: per-project Notion values → global env vars → None (skip).
+    """
+    chat = proj.get("report_chat_id") or _env_int("TELEGRAM_REPORT_CHAT_ID")
+    thread = proj.get("report_thread_id") or _env_int("TELEGRAM_REPORT_THREAD_ID")
+    if chat and thread:
+        return (chat, thread)
+    return None
+
+
+def _env_int(name: str) -> int | None:
+    val = os.environ.get(name, "").strip()
+    return int(val) if val.lstrip("-").isdigit() and int(val) != 0 else None
+
+
 @app.route("/api/daily_report", methods=["GET", "POST"])
 def daily_report():
     now_prague = datetime.now(tz=_TZ)
     if now_prague.hour != 9:
         logger.info("Skipping: Prague time is %s, expected 09:xx.", now_prague.strftime("%H:%M"))
         return "skip", 200
-
-    chat_id_env = os.environ.get("TELEGRAM_REPORT_CHAT_ID", "")
-    thread_id_env = os.environ.get("TELEGRAM_REPORT_THREAD_ID", "")
-    if not chat_id_env or not thread_id_env:
-        logger.error("TELEGRAM_REPORT_CHAT_ID / TELEGRAM_REPORT_THREAD_ID not configured.")
-        return "not configured", 500
-
-    chat_id = int(chat_id_env)
-    thread_id = int(thread_id_env)
 
     try:
         projects = load_report_projects()
@@ -108,37 +116,46 @@ def daily_report():
         logger.info("No projects with 'Отчёт' enabled in Notion.")
         return "no projects", 200
 
-    try:
-        jira = JiraReporter(
-            url=os.environ["JIRA_URL"],
-            email=os.environ["JIRA_EMAIL"],
-            api_token=os.environ["JIRA_API_TOKEN"],
-        )
-    except KeyError as exc:
-        logger.error("Missing env var: %s", exc)
-        return "config error", 500
+    jira = JiraReporter(
+        url=os.environ["JIRA_URL"],
+        email=os.environ["JIRA_EMAIL"],
+        api_token=os.environ["JIRA_API_TOKEN"],
+    )
 
     today_label = date.today().strftime("%d.%m.%Y")
     header = f"📊 <b>Ежедневный отчёт — {today_label}</b>"
 
-    blocks: list[str] = []
+    # Group projects by destination (chat_id, thread_id)
+    groups: dict[tuple[int, int], list[dict]] = {}
     for proj in projects:
-        try:
-            report = jira.get_project_report(proj["jira_key"])
-            blocks.append(_build_project_block(proj, report))
-        except Exception as exc:
-            logger.exception("Jira query failed for %s: %s", proj["jira_key"], exc)
-            blocks.append(f"<b>📁 {proj['name']}</b>\n⚠️ Ошибка запроса к Jira")
+        dest = _resolve_destination(proj)
+        if dest is None:
+            logger.warning("No destination for project %s — skipping.", proj["name"])
+            continue
+        groups.setdefault(dest, []).append(proj)
 
-    full_message = header + "\n\n" + "\n\n".join(blocks)
+    if not groups:
+        logger.error("No destinations configured. Set Report Chat ID / Thread ID in Notion or env vars.")
+        return "no destinations", 500
 
-    if len(full_message) <= 4000:
-        _send(chat_id, thread_id, full_message)
-    else:
-        # Send header once, then each project block separately
-        _send(chat_id, thread_id, header)
-        for block in blocks:
-            _send(chat_id, thread_id, block)
+    for (chat_id, thread_id), group_projects in groups.items():
+        blocks: list[str] = []
+        for proj in group_projects:
+            try:
+                report = jira.get_project_report(proj["jira_key"])
+                blocks.append(_build_project_block(proj, report))
+            except Exception as exc:
+                logger.exception("Jira query failed for %s: %s", proj["jira_key"], exc)
+                blocks.append(f"<b>📁 {proj['name']}</b>\n⚠️ Ошибка запроса к Jira")
 
-    logger.info("Daily report sent: %d projects, chat=%s thread=%s", len(projects), chat_id, thread_id)
+        full_message = header + "\n\n" + "\n\n".join(blocks)
+        if len(full_message) <= 4000:
+            _send(chat_id, thread_id, full_message)
+        else:
+            _send(chat_id, thread_id, header)
+            for block in blocks:
+                _send(chat_id, thread_id, block)
+
+        logger.info("Report sent to chat=%s thread=%s (%d projects)", chat_id, thread_id, len(group_projects))
+
     return "ok", 200

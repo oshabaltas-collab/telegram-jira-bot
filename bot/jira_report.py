@@ -20,29 +20,29 @@ class JiraReporter:
         self.headers = {"Accept": "application/json"}
 
     def _search(self, jql: str) -> list[dict]:
+        # Uses the enhanced JQL search endpoint (/search/jql); the legacy
+        # /rest/api/3/search was removed by Atlassian (returns 410 Gone).
+        # Pagination is token-based: follow nextPageToken until isLast.
         fields = "summary,status,duedate,issuetype,parent"
         all_issues: list[dict] = []
-        start = 0
+        next_token: str | None = None
         while True:
+            params = {"jql": jql, "fields": fields, "maxResults": 100}
+            if next_token:
+                params["nextPageToken"] = next_token
             resp = requests.get(
-                f"{self.base}/rest/api/3/search",
-                params={
-                    "jql": jql,
-                    "fields": fields,
-                    "startAt": start,
-                    "maxResults": 100,
-                },
+                f"{self.base}/rest/api/3/search/jql",
+                params=params,
                 auth=self.auth,
                 headers=self.headers,
                 timeout=30,
             )
             resp.raise_for_status()
             data = resp.json()
-            batch = data.get("issues", [])
-            all_issues.extend(batch)
-            if len(all_issues) >= data.get("total", 0) or not batch:
+            all_issues.extend(data.get("issues", []))
+            if data.get("isLast", True) or not data.get("nextPageToken"):
                 break
-            start += len(batch)
+            next_token = data["nextPageToken"]
         return all_issues
 
     def get_project_report(self, project_key: str) -> dict:

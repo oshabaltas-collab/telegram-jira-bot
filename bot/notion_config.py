@@ -83,7 +83,12 @@ def load_report_projects() -> list[dict]:
         props = page["properties"]
         name = _text(props.get("Name", {}))
         jira_key = _text(props.get("Jira Key", {}))
-        include = props.get("Отчёт", {}).get("checkbox", False)
+        # Match the report checkbox regardless of Отчёт/Отчет (ё vs е) spelling
+        include = next(
+            (v.get("checkbox", False) for k, v in props.items()
+             if v.get("type") == "checkbox" and k.lower().replace("ё", "е").startswith("отчет")),
+            False,
+        )
         if not (name and jira_key and include):
             continue
         chat_raw = _text(props.get("Report Chat ID", {})).strip()

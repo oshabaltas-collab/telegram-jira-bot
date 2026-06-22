@@ -1,10 +1,16 @@
 """
-Jira query logic for the daily report.
+Jira query and report formatting logic — shared by daily cron and on-demand handler.
 """
 
+import logging
 from datetime import date
 import requests
 from requests.auth import HTTPBasicAuth
+
+logger = logging.getLogger(__name__)
+
+_JIRA_BASE = "https://fincortex.atlassian.net"
+_MAX_PER_SECTION = 20
 
 
 class JiraReporter:
@@ -40,7 +46,7 @@ class JiraReporter:
         return all_issues
 
     def get_project_report(self, project_key: str) -> dict:
-        today = date.today().isoformat()  # YYYY-MM-DD
+        today = date.today().isoformat()
 
         overdue = self._search(
             f'project = "{project_key}" AND duedate < "{today}"'
@@ -59,3 +65,60 @@ class JiraReporter:
             "due_today": due_today,
             "in_progress_count": len(in_progress),
         }
+
+
+# ── Formatting helpers ────────────────────────────────────────────────────────
+
+def _fmt_issue(issue: dict) -> str:
+    key = issue["key"]
+    summary = issue["fields"].get("summary", "—")
+    url = f"{_JIRA_BASE}/browse/{key}"
+    return f'• <a href="{url}">{key}</a> — {summary}'
+
+
+def _section(title: str, issues: list[dict]) -> list[str]:
+    lines = [title]
+    for issue in issues[:_MAX_PER_SECTION]:
+        lines.append(_fmt_issue(issue))
+    if len(issues) > _MAX_PER_SECTION:
+        lines.append(f"  … и ещё {len(issues) - _MAX_PER_SECTION}")
+    return lines
+
+
+def build_project_block(proj: dict, report: dict) -> str:
+    lines = [f"<b>📁 {proj['name']}</b>"]
+
+    if report["overdue"]:
+        lines += _section(
+            f"🔴 <b>Просрочено ({len(report['overdue'])}):</b>",
+            report["overdue"],
+        )
+    if report["due_today"]:
+        lines += _section(
+            f"📅 <b>Дедлайн сегодня ({len(report['due_today'])}):</b>",
+            report["due_today"],
+        )
+    if not report["overdue"] and not report["due_today"]:
+        lines.append("✅ Просроченных и срочных задач нет")
+
+    lines.append(f"🔄 <b>В работе:</b> {report['in_progress_count']} задач")
+    return "\n".join(lines)
+
+
+def build_full_report(projects: list[dict], jira: JiraReporter) -> tuple[str, list[str]]:
+    """Returns (header_text, [project_block, ...]).
+    Each block is HTML-formatted and safe to send as a standalone Telegram message.
+    """
+    today_label = date.today().strftime("%d.%m.%Y")
+    header = f"📊 <b>Ежедневный отчёт — {today_label}</b>"
+
+    blocks: list[str] = []
+    for proj in projects:
+        try:
+            report = jira.get_project_report(proj["jira_key"])
+            blocks.append(build_project_block(proj, report))
+        except Exception as exc:
+            logger.exception("Jira query failed for %s: %s", proj["jira_key"], exc)
+            blocks.append(f"<b>📁 {proj['name']}</b>\n⚠️ Ошибка запроса к Jira")
+
+    return header, blocks

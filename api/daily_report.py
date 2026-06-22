@@ -1,32 +1,29 @@
 """
-Vercel cron function — sends daily Jira status report to Telegram at 09:00 Europe/Prague.
+Vercel cron function — sends daily Jira report at 09:00 Europe/Prague on weekdays.
 
 Vercel triggers this at 07:00 UTC and 08:00 UTC every day.
-The function only sends when local Prague time is 09:xx (handles CET/CEST automatically).
+The function skips silently on weekends and when Prague clock is not 09:xx.
 """
 
 import logging
 import os
 import sys
-from datetime import date, datetime
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import requests
-from flask import Flask, request
+from flask import Flask
 
-from bot.jira_report import JiraReporter
+from bot.jira_report import JiraReporter, build_full_report
 from bot.notion_config import load_report_projects
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
 _TZ = ZoneInfo("Europe/Prague")
-_JIRA_BASE = "https://fincortex.atlassian.net"
-_MAX_PER_SECTION = 20  # cap issues per section to stay under Telegram 4096-char limit
 
 
 def _send(chat_id: int, thread_id: int, text: str) -> None:
@@ -44,54 +41,14 @@ def _send(chat_id: int, thread_id: int, text: str) -> None:
     )
 
 
-def _fmt_issue(issue: dict) -> str:
-    key = issue["key"]
-    summary = issue["fields"].get("summary", "—")
-    url = f"{_JIRA_BASE}/browse/{key}"
-    return f'• <a href="{url}">{key}</a> — {summary}'
-
-
-def _section(title: str, issues: list[dict]) -> list[str]:
-    lines = [title]
-    for issue in issues[:_MAX_PER_SECTION]:
-        lines.append(_fmt_issue(issue))
-    if len(issues) > _MAX_PER_SECTION:
-        lines.append(f"  … и ещё {len(issues) - _MAX_PER_SECTION}")
-    return lines
-
-
-def _build_project_block(proj: dict, report: dict) -> str:
-    lines = [f"<b>📁 {proj['name']}</b>"]
-
-    if report["overdue"]:
-        lines += _section(
-            f"🔴 <b>Просрочено ({len(report['overdue'])}):</b>",
-            report["overdue"],
-        )
-
-    if report["due_today"]:
-        lines += _section(
-            f"📅 <b>Дедлайн сегодня ({len(report['due_today'])}):</b>",
-            report["due_today"],
-        )
-
-    if not report["overdue"] and not report["due_today"]:
-        lines.append("✅ Просроченных и срочных задач нет")
-
-    lines.append(f"🔄 <b>В работе:</b> {report['in_progress_count']} задач")
-    return "\n".join(lines)
-
-
-def _resolve_destination(proj: dict) -> tuple[int, int] | None:
-    """Returns (chat_id, thread_id) for a project.
-
-    Priority: per-project Notion values → global env vars → None (skip).
-    """
-    chat = proj.get("report_chat_id") or _env_int("TELEGRAM_REPORT_CHAT_ID")
-    thread = proj.get("report_thread_id") or _env_int("TELEGRAM_REPORT_THREAD_ID")
-    if chat and thread:
-        return (chat, thread)
-    return None
+def _send_report_to(chat_id: int, thread_id: int, header: str, blocks: list[str]) -> None:
+    full = header + "\n\n" + "\n\n".join(blocks)
+    if len(full) <= 4000:
+        _send(chat_id, thread_id, full)
+    else:
+        _send(chat_id, thread_id, header)
+        for block in blocks:
+            _send(chat_id, thread_id, block)
 
 
 def _env_int(name: str) -> int | None:
@@ -99,11 +56,24 @@ def _env_int(name: str) -> int | None:
     return int(val) if val.lstrip("-").isdigit() and int(val) != 0 else None
 
 
+def _resolve_destination(proj: dict) -> tuple[int, int] | None:
+    chat = proj.get("report_chat_id") or _env_int("TELEGRAM_REPORT_CHAT_ID")
+    thread = proj.get("report_thread_id") or _env_int("TELEGRAM_REPORT_THREAD_ID")
+    return (chat, thread) if chat and thread else None
+
+
 @app.route("/api/daily_report", methods=["GET", "POST"])
 def daily_report():
     now_prague = datetime.now(tz=_TZ)
+
+    # Weekdays only (Mon=0 … Fri=4; Sat=5, Sun=6)
+    if now_prague.weekday() >= 5:
+        logger.info("Weekend (%s), skipping report.", now_prague.strftime("%A"))
+        return "weekend", 200
+
+    # 09:00 Prague time (handles CET/CEST automatically via double cron)
     if now_prague.hour != 9:
-        logger.info("Skipping: Prague time is %s, expected 09:xx.", now_prague.strftime("%H:%M"))
+        logger.info("Not 09:xx Prague time (%s), skipping.", now_prague.strftime("%H:%M"))
         return "skip", 200
 
     try:
@@ -122,40 +92,23 @@ def daily_report():
         api_token=os.environ["JIRA_API_TOKEN"],
     )
 
-    today_label = date.today().strftime("%d.%m.%Y")
-    header = f"📊 <b>Ежедневный отчёт — {today_label}</b>"
+    header, blocks_all = build_full_report(projects, jira)
 
-    # Group projects by destination (chat_id, thread_id)
-    groups: dict[tuple[int, int], list[dict]] = {}
-    for proj in projects:
+    # Group projects+blocks by destination
+    groups: dict[tuple[int, int], list[str]] = {}
+    for proj, block in zip(projects, blocks_all):
         dest = _resolve_destination(proj)
         if dest is None:
             logger.warning("No destination for project %s — skipping.", proj["name"])
             continue
-        groups.setdefault(dest, []).append(proj)
+        groups.setdefault(dest, []).append(block)
 
     if not groups:
-        logger.error("No destinations configured. Set Report Chat ID / Thread ID in Notion or env vars.")
+        logger.error("No valid destinations configured.")
         return "no destinations", 500
 
-    for (chat_id, thread_id), group_projects in groups.items():
-        blocks: list[str] = []
-        for proj in group_projects:
-            try:
-                report = jira.get_project_report(proj["jira_key"])
-                blocks.append(_build_project_block(proj, report))
-            except Exception as exc:
-                logger.exception("Jira query failed for %s: %s", proj["jira_key"], exc)
-                blocks.append(f"<b>📁 {proj['name']}</b>\n⚠️ Ошибка запроса к Jira")
-
-        full_message = header + "\n\n" + "\n\n".join(blocks)
-        if len(full_message) <= 4000:
-            _send(chat_id, thread_id, full_message)
-        else:
-            _send(chat_id, thread_id, header)
-            for block in blocks:
-                _send(chat_id, thread_id, block)
-
-        logger.info("Report sent to chat=%s thread=%s (%d projects)", chat_id, thread_id, len(group_projects))
+    for (chat_id, thread_id), blocks in groups.items():
+        _send_report_to(chat_id, thread_id, header, blocks)
+        logger.info("Report sent to chat=%s thread=%s (%d projects)", chat_id, thread_id, len(blocks))
 
     return "ok", 200

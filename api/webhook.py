@@ -18,7 +18,8 @@ import requests
 from flask import Flask, abort, request
 
 from bot.jira_client import JiraClient
-from bot.notion_config import load_projects, load_users
+from bot.jira_report import JiraReporter, build_full_report
+from bot.notion_config import load_projects, load_report_projects, load_users
 from bot.parser import parse_message, resolve_project, resolve_user
 
 logging.basicConfig(level=logging.INFO)
@@ -44,9 +45,16 @@ def _default_due_date(msg_timestamp: int) -> str:
     return (base + timedelta(days=5)).strftime("%Y-%m-%d")
 
 
-def _send(chat_id: int, text: str, reply_to_id: int | None = None) -> None:
+def _send(
+    chat_id: int,
+    text: str,
+    reply_to_id: int | None = None,
+    thread_id: int | None = None,
+) -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
-    payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    if thread_id:
+        payload["message_thread_id"] = thread_id
     if reply_to_id:
         payload["reply_parameters"] = {"message_id": reply_to_id}
     requests.post(
@@ -77,6 +85,43 @@ def _check_secret(req) -> bool:
     return hmac.compare_digest(incoming, secret)
 
 
+def _handle_report(chat_id: int, message_id: int, thread_id: int | None):
+    """Generate and send on-demand report in the current thread."""
+    try:
+        projects = load_report_projects()
+    except Exception as exc:
+        logger.exception("Notion read failed: %s", exc)
+        _send(chat_id, "❌ Не удалось прочитать конфиг из Notion.", reply_to_id=message_id)
+        return "ok", 200
+
+    if not projects:
+        _send(chat_id, "⚠️ Нет проектов с включённым отчётом в Notion (поставьте галочку «Отчёт»).", reply_to_id=message_id)
+        return "ok", 200
+
+    try:
+        jira = JiraReporter(
+            url=os.environ["JIRA_URL"],
+            email=os.environ["JIRA_EMAIL"],
+            api_token=os.environ["JIRA_API_TOKEN"],
+        )
+        header, blocks = build_full_report(projects, jira)
+    except Exception as exc:
+        logger.exception("Report generation failed: %s", exc)
+        _send(chat_id, "❌ Ошибка при формировании отчёта. Проверьте логи Vercel.", reply_to_id=message_id)
+        return "ok", 200
+
+    full = header + "\n\n" + "\n\n".join(blocks)
+    if len(full) <= 4000:
+        _send(chat_id, full, reply_to_id=message_id, thread_id=thread_id)
+    else:
+        # First message replies to the command; rest are standalone in the same thread
+        _send(chat_id, header, reply_to_id=message_id, thread_id=thread_id)
+        for block in blocks:
+            _send(chat_id, block, thread_id=thread_id)
+
+    return "ok", 200
+
+
 @app.route("/api/webhook", methods=["POST"])
 def webhook():
     if not _check_secret(request):
@@ -95,9 +140,13 @@ def webhook():
 
     # Helper: reply with chat/thread IDs so admin can configure env vars
     if text.strip() == "/threadid":
-        thread_id = message.get("message_thread_id", "—")
-        _send(chat_id, f"<b>Chat ID:</b> <code>{chat_id}</code>\n<b>Thread ID:</b> <code>{thread_id}</code>", reply_to_id=message_id)
+        tid = message.get("message_thread_id", "—")
+        _send(chat_id, f"<b>Chat ID:</b> <code>{chat_id}</code>\n<b>Thread ID:</b> <code>{tid}</code>", reply_to_id=message_id)
         return "ok", 200
+
+    # On-demand report: #репорт_проекты
+    if "#репорт_проекты" in text.lower():
+        return _handle_report(chat_id, message_id, message.get("message_thread_id"))
 
     parsed = parse_message(text)
     if parsed is None:

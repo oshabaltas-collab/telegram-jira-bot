@@ -57,13 +57,13 @@ class JiraReporter:
             f' AND statusCategory != Done'
         )
         in_progress = self._search(
-            f'project = "{project_key}" AND status = "В работе"'
+            f'project = "{project_key}" AND status = "В работе" ORDER BY duedate ASC'
         )
 
         return {
             "overdue": overdue,
             "due_today": due_today,
-            "in_progress_count": len(in_progress),
+            "in_progress": in_progress,
         }
 
 
@@ -88,20 +88,25 @@ def _section(title: str, issues: list[dict]) -> list[str]:
 def build_project_block(proj: dict, report: dict) -> str:
     lines = [f"<b>📁 {proj['name']}</b>"]
 
-    if report["overdue"]:
+    if report["in_progress"]:
         lines += _section(
-            f"🔴 <b>Просрочено ({len(report['overdue'])}):</b>",
-            report["overdue"],
+            f"🔄 <b>В работе ({len(report['in_progress'])}):</b>",
+            report["in_progress"],
         )
     if report["due_today"]:
         lines += _section(
             f"📅 <b>Дедлайн сегодня ({len(report['due_today'])}):</b>",
             report["due_today"],
         )
-    if not report["overdue"] and not report["due_today"]:
-        lines.append("✅ Просроченных и срочных задач нет")
+    if report["overdue"]:
+        lines += _section(
+            f"🔴 <b>Просрочено ({len(report['overdue'])}):</b>",
+            report["overdue"],
+        )
 
-    lines.append(f"🔄 <b>В работе:</b> {report['in_progress_count']} задач")
+    if not (report["in_progress"] or report["due_today"] or report["overdue"]):
+        lines.append("✅ Активных задач нет")
+
     return "\n".join(lines)
 
 

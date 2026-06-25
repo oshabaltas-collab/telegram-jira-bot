@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import requests
 from flask import Flask
 
-from bot.jira_report import JiraReporter, build_full_report
-from bot.notion_config import load_report_projects
+from bot.jira_report import JiraReporter, build_full_report, split_message
+from bot.notion_config import load_account_names, load_report_projects
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,10 +45,12 @@ def _send_report_to(chat_id: int, thread_id: int, header: str, blocks: list[str]
     full = header + "\n\n" + "\n\n".join(blocks)
     if len(full) <= 4000:
         _send(chat_id, thread_id, full)
-    else:
-        _send(chat_id, thread_id, header)
-        for block in blocks:
-            _send(chat_id, thread_id, block)
+        return
+    # Too long: send header, then each block (splitting any oversized block by lines)
+    _send(chat_id, thread_id, header)
+    for block in blocks:
+        for chunk in split_message(block):
+            _send(chat_id, thread_id, chunk)
 
 
 def _env_int(name: str) -> int | None:
@@ -92,7 +94,12 @@ def daily_report():
         api_token=os.environ["JIRA_API_TOKEN"],
     )
 
-    header, blocks_all = build_full_report(projects, jira)
+    try:
+        names = load_account_names()
+    except Exception:
+        names = {}
+
+    header, blocks_all = build_full_report(projects, jira, names)
 
     # Group projects+blocks by destination
     groups: dict[tuple[int, int], list[str]] = {}

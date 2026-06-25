@@ -18,8 +18,19 @@ import requests
 from flask import Flask, abort, request
 
 from bot.jira_client import JiraClient
-from bot.jira_report import JiraReporter, build_full_report
-from bot.notion_config import load_projects, load_report_projects, load_users
+from bot.jira_report import (
+    JiraReporter,
+    build_full_report,
+    build_person_block,
+    build_project_block,
+    split_message,
+)
+from bot.notion_config import (
+    load_account_names,
+    load_projects,
+    load_report_projects,
+    load_users,
+)
 from bot.parser import parse_message, resolve_project, resolve_user
 
 logging.basicConfig(level=logging.INFO)
@@ -85,8 +96,31 @@ def _check_secret(req) -> bool:
     return hmac.compare_digest(incoming, secret)
 
 
-def _handle_report(chat_id: int, message_id: int, thread_id: int | None):
-    """Generate and send on-demand report in the current thread."""
+def _jira_reporter() -> JiraReporter:
+    return JiraReporter(
+        url=os.environ["JIRA_URL"],
+        email=os.environ["JIRA_EMAIL"],
+        api_token=os.environ["JIRA_API_TOKEN"],
+    )
+
+
+def _send_report(chat_id: int, message_id: int, thread_id: int | None,
+                 header: str, blocks: list[str]) -> None:
+    """Send a report; first message replies to the command, rest stay in-thread."""
+    parts = ([header] if header else []) + blocks
+    full = "\n\n".join(parts)
+    if len(full) <= 4000:
+        _send(chat_id, full, reply_to_id=message_id, thread_id=thread_id)
+        return
+    first = True
+    for block in parts:
+        for chunk in split_message(block):
+            _send(chat_id, chunk, reply_to_id=message_id if first else None, thread_id=thread_id)
+            first = False
+
+
+def _handle_report_all(chat_id: int, message_id: int, thread_id: int | None):
+    """#репорт_проекты — full report across all enabled projects."""
     try:
         projects = load_report_projects()
     except Exception as exc:
@@ -99,27 +133,57 @@ def _handle_report(chat_id: int, message_id: int, thread_id: int | None):
         return "ok", 200
 
     try:
-        jira = JiraReporter(
-            url=os.environ["JIRA_URL"],
-            email=os.environ["JIRA_EMAIL"],
-            api_token=os.environ["JIRA_API_TOKEN"],
-        )
-        header, blocks = build_full_report(projects, jira)
+        names = _safe_names()
+        header, blocks = build_full_report(projects, _jira_reporter(), names)
     except Exception as exc:
         logger.exception("Report generation failed: %s", exc)
         _send(chat_id, "❌ Ошибка при формировании отчёта. Проверьте логи Vercel.", reply_to_id=message_id)
         return "ok", 200
 
-    full = header + "\n\n" + "\n\n".join(blocks)
-    if len(full) <= 4000:
-        _send(chat_id, full, reply_to_id=message_id, thread_id=thread_id)
-    else:
-        # First message replies to the command; rest are standalone in the same thread
-        _send(chat_id, header, reply_to_id=message_id, thread_id=thread_id)
-        for block in blocks:
-            _send(chat_id, block, thread_id=thread_id)
-
+    _send_report(chat_id, message_id, thread_id, header, blocks)
     return "ok", 200
+
+
+def _handle_report_query(arg: str, chat_id: int, message_id: int, thread_id: int | None):
+    """#репорт <проект|человек> — single project or single person report."""
+    try:
+        projects = load_projects()
+        users = load_users()
+        names = _safe_names()
+    except Exception as exc:
+        logger.exception("Notion read failed: %s", exc)
+        _send(chat_id, "❌ Не удалось прочитать конфиг из Notion.", reply_to_id=message_id)
+        return "ok", 200
+
+    project = resolve_project(arg, projects)
+    user = resolve_user(arg, users)
+
+    try:
+        jira = _jira_reporter()
+        if project:
+            report = jira.get_project_report(project["jira_key"])
+            block = build_project_block(project, report, names)
+        elif user:
+            report = jira.get_person_report(user["jira_account_id"])
+            block = build_person_block(user["name"], report, names)
+        else:
+            _send(chat_id, f'⚠️ Не нашёл проект или человека «{arg}». '
+                           f'Проверьте название (см. справку).', reply_to_id=message_id)
+            return "ok", 200
+    except Exception as exc:
+        logger.exception("Report query failed: %s", exc)
+        _send(chat_id, "❌ Ошибка при формировании отчёта. Проверьте логи Vercel.", reply_to_id=message_id)
+        return "ok", 200
+
+    _send_report(chat_id, message_id, thread_id, "", [block])
+    return "ok", 200
+
+
+def _safe_names() -> dict:
+    try:
+        return load_account_names()
+    except Exception:
+        return {}
 
 
 @app.route("/api/webhook", methods=["POST"])
@@ -144,9 +208,20 @@ def webhook():
         _send(chat_id, f"<b>Chat ID:</b> <code>{chat_id}</code>\n<b>Thread ID:</b> <code>{tid}</code>", reply_to_id=message_id)
         return "ok", 200
 
-    # On-demand report: #репорт_проекты
-    if "#репорт_проекты" in text.lower():
-        return _handle_report(chat_id, message_id, message.get("message_thread_id"))
+    # On-demand reports
+    low = text.lower()
+    thread_id = message.get("message_thread_id")
+    if "#репорт_проекты" in low:
+        return _handle_report_all(chat_id, message_id, thread_id)
+    if "#репорт" in low:
+        # Everything after the #репорт token on its line is the project/person name
+        idx = low.find("#репорт")
+        rest = text[idx + len("#репорт"):].lstrip(" _").splitlines()[0].strip()
+        if rest:
+            return _handle_report_query(rest, chat_id, message_id, thread_id)
+        _send(chat_id, "Укажите проект или человека: <code>#репорт Максти</code> или <code>#репорт Лиза</code>.\n"
+                       "Полный отчёт по всем проектам — <code>#репорт_проекты</code>.", reply_to_id=message_id)
+        return "ok", 200
 
     parsed = parse_message(text)
     if parsed is None:

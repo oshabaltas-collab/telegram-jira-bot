@@ -122,3 +122,16 @@ def load_users() -> dict[str, dict]:
             if alias:
                 lookup[alias.lower()] = entry
     return lookup
+
+
+def load_account_names() -> dict[str, str]:
+    """Returns {jira_account_id: canonical Name} for showing short names in reports."""
+    pages = _query_db(os.environ["NOTION_USERS_DB_ID"])
+    out: dict[str, str] = {}
+    for page in pages:
+        props = page["properties"]
+        name = _text(props.get("Name", {}))
+        account_id = _text(props.get("Jira Account ID", {})).strip().split("?", 1)[0]
+        if name and account_id:
+            out[account_id] = name
+    return out

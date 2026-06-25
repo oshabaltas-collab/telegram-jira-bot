@@ -1,7 +1,7 @@
 """
-Vercel cron function — sends daily Jira report at 09:00 Europe/Prague on weekdays.
+Vercel cron function — sends daily Jira report at 09:30 Europe/Prague on weekdays.
 
-Vercel triggers this at 07:00 UTC and 08:00 UTC every day.
+Vercel triggers this at 07:30 UTC and 08:30 UTC every day (covers CET and CEST).
 The function skips silently on weekends and when Prague clock is not 09:xx.
 """
 
@@ -73,7 +73,7 @@ def daily_report():
         logger.info("Weekend (%s), skipping report.", now_prague.strftime("%A"))
         return "weekend", 200
 
-    # 09:00 Prague time (handles CET/CEST automatically via double cron)
+    # 09:30 Prague time (cron fires at :30; double cron handles CET/CEST)
     if now_prague.hour != 9:
         logger.info("Not 09:xx Prague time (%s), skipping.", now_prague.strftime("%H:%M"))
         return "skip", 200

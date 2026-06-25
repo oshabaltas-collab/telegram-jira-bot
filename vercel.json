@@ -8,6 +8,6 @@
     { "src": "/api/daily_report", "dest": "/api/daily_report.py" }
   ],
   "crons": [
-    { "path": "/api/daily_report", "schedule": "0 7,8 * * *" }
+    { "path": "/api/daily_report", "schedule": "30 7,8 * * *" }
   ]
 }

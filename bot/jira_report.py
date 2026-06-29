@@ -113,7 +113,7 @@ def _fmt_issue(issue: dict, names: dict | None = None,
 
 def _section(title: str, issues: list[dict], names: dict | None,
              show_status: bool, show_days: bool) -> list[str]:
-    lines = [title]
+    lines = ["", title, ""]
     for issue in issues[:_MAX_PER_SECTION]:
         lines.append(_fmt_issue(issue, names, show_status, show_days))
     if len(issues) > _MAX_PER_SECTION:
@@ -159,7 +159,7 @@ def build_project_block(proj: dict, report: dict, names: dict | None = None) -> 
     if not (report["in_progress"] or report["due_today"] or report["overdue"]):
         lines.append("✅ Активных задач нет")
 
-    return "\n".join(lines)
+    return "\n".join(lines).strip()
 
 
 def build_person_block(person_name: str, report: dict, names: dict | None = None) -> str:
@@ -180,7 +180,7 @@ def build_person_block(person_name: str, report: dict, names: dict | None = None
     if not (report["in_progress"] or report["due_today"] or report["overdue"]):
         lines.append("✅ Активных задач нет")
 
-    return "\n".join(lines)
+    return "\n".join(lines).strip()
 
 
 def build_full_report(projects: list[dict], jira: JiraReporter,
